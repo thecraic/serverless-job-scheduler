@@ -8,16 +8,16 @@ import croniter
 
 lambda_client = boto3.client('lambda')
 dynamodb = boto3.resource('dynamodb')
-            
-def lambda_handler(event, context):
+JOB_CONFIGURATION_TABLE = os.environ["JOB_CONFIGURATION_TABLE"]
+JOB_RUNNER_LAMBDA = os.environ["JOB_RUNNER_LAMBDA"]
 
-    JOB_RUNNER_LAMBDA = os.environ["JOB_RUNNER_LAMBDA"]
+def lambda_handler(event, context):
     
     current_ts = int(time.time())
     print ("Current timestamp: " + str(current_ts))
     
     # lookup dynamoDB to get jobs on this schedule
-    table = dynamodb.Table('job_configuration')
+    table = dynamodb.Table(JOB_CONFIGURATION_TABLE)
     response = table.scan(
     FilterExpression=Attr('next_fire_time').lt(current_ts) & Attr('job_status').eq("READY")
     )
