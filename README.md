@@ -1,9 +1,10 @@
 # Serverless Job Scheduler
 
-The Serverless Job Scheduler is a prototype ad-hoc job scheduler that shows how Amazon Cloudwatch, Lambda, Fargate and SNS can be used to implement a cost-effective scalable, event driven job scheduler. Jobs are tasks that may take longer than 15 minutes to run (Lambda max execution time) - and are implemented as a docker container execution.
+The Serverless Job Scheduler is a prototype ad-hoc job scheduler that shows how Amazon Cloudwatch, Lambda, Fargate and SNS can be used to implement a cost-effective scalable, event driven job scheduler. 
+
+Sometimes jobs take longer than 15 minutes to run (Lambda max execution time). In these cases it makes sense to run the job as an ECS (Elastic Container Service) fargate task.
 
 This example is easy to deploy and uses AWS CloudFormation to automatically provision and configure the necessary AWS services.
-
 
 
 ![architecture diagram](/images/architecture.png)
@@ -13,15 +14,30 @@ Job configurations, including cron schedule, current status and job execution pa
 
 A CloudWatch rule running every minute triggers a Lambda function (JobDispatcher) which checks the job configurations for any jobs that have exceeded their "next fire time" and are "READY" to run. 
 
-The dispatcher then asychronously invokes another (JobRunner) Lambda function for each job which creates a fargate task with an environment of the job execution parameters. It then calculates the "next fire time" for the job based on it's cron schedule and updates the job status in DynamoDB to "RUNNING" - preventing double jobbing.
+The JobDispatcher then asychronously invokes another (JobRunner) Lambda function for each overdue job. It then calculates the "next fire time" for the job based on it's cron schedule and updates the job status in DynamoDB to "RUNNING" - preventing double jobbing.
+
+The JobRunner function  performs a check (polls) to see if there is work to do, and then creates a fargate task passing the job execution details to the docker container as an environment variable. 
 
 When the fargate task is completed, the Amazon ECS (Elastic Container Service) system automatically generates an SNS (Simple Notification Service) event. A CloudWatch rule detects these events and triggers a (JobMonitor) Lambda function which returns the status of the job to "READY"  - in preparation for the next scheduled fire time.
 
-Jobs configuration records are managed by adding or inserting them into the DynamoDB table.
+Jobs configuration records are managed by adding or updating them into the DynamoDB table.
+
+## Advantages
+* Practically infinite number of job configurations are possible. CloudWatch default event bus is limited to 300 initially.
+* No requirement to maintain servers for cron tasks.
+* Flexiblity to specify different task defintions or docker containers in job configurations (not demonstrated here).
+* DynamoDB can be conveniently used by an application to manage job configurations, or see what is currently running.
 
 ## Limitations
 * This example is a prototype, provide as-is without guarantee and not meant to be used in production without modification for fault tolerance and exception handling.
 * Fargate launch type has an initial quota of 50 concurrent executions - this limit may be raised by requesting a limit increase.
+* JobRunner polling is a basic "file exists" check for this prototype. 
+* JobDisptacher is called every minute by CloudWatch. If you need this to run more than once per minute. [See here](https://aws.amazon.com/blogs/architecture/a-serverless-solution-for-invoking-aws-lambda-at-a-sub-minute-frequency/)
+
+
+## Recommendations
+* [AWS Systems Manager Parameter Store](https://docs.aws.amazon.com/systems-manager/latest/userguide/systems-manager-parameter-store.html) should be used to store any credentials used by tasks or polling functions.
+* Fargate containers have 10Gb ephemeral storage  - considering chunking or streaming larger files into S3
 
 
 ## Getting Started
@@ -42,7 +58,12 @@ Create the CloudFormation stack. This will create all of the resources in the de
 
 ```
 cd serverless-job-scheduler
-aws cloudformation create-stack --stack-name serverless-job-scheduler --capabilities CAPABILITY_IAM --template-body file://$PWD/serverless-job-scheduler.yml --parameters ParameterKey=AllowedBucket,ParameterValue=$BUCKET_NAME
+aws cloudformation create-stack \
+    --stack-name serverless-job-scheduler \
+    --capabilities CAPABILITY_IAM  \
+    --template-body file://$PWD/serverless-job-scheduler.yml \
+    --parameters ParameterKey=AllowedBucket,ParameterValue=$BUCKET_NAME
+
 ```
 Monitor the stack creation until complete in the AWS Console under CloudFormation. 
 

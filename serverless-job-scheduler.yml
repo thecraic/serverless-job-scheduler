@@ -350,7 +350,7 @@ Resources:
       Cpu: 256
       TaskRoleArn: !Ref 'ECSTaskExecutionRole'
       ExecutionRoleArn: !Ref 'ECSTaskExecutionRole'
-      Family: my-fargate-task
+      Family: job-runner-task
       Memory: 2GB
       NetworkMode: awsvpc
       RequiresCompatibilities:
@@ -398,6 +398,13 @@ Resources:
             import boto3
             import json
             import os
+            import urllib
+
+            CLUSTER_NAME = os.environ["CLUSTER_NAME"]
+            SUBNETS = os.environ["SUBNETS"].split(",")
+            JOB_CONFIGURATION_TABLE = os.environ["JOB_CONFIGURATION_TABLE"]
+
+            dynamodb = boto3.resource('dynamodb')
 
             def lambda_handler(event,context):
 
@@ -407,40 +414,64 @@ Resources:
                   jobId = event['jobId']
 
               print ("Attempting to run job with ID: " + jobId)
-
-              CLUSTER_NAME = os.environ["CLUSTER_NAME"]
-              SUBNETS = os.environ["SUBNETS"].split(",")
-
-              client = boto3.client('ecs')
-              response = client.run_task(
-              cluster=CLUSTER_NAME, 
-              launchType = 'FARGATE',
-              taskDefinition='my-fargate-task',
-              count = 1,
-              platformVersion='LATEST',
-              networkConfiguration={
-                    'awsvpcConfiguration': {
-                        'subnets': 
-                            SUBNETS
-                        ,
-                        'assignPublicIp': 'ENABLED'
-                    }
-                },
-                overrides={"containerOverrides": [{
-                        "name": "job-runner",
-                        "command": ["python" , "/tmp/run-job.py" , jobId],
-                        "environment": [
-                            {
-                                    'name': 'JOB_DETAIL',
-                                    'value': json.dumps(event)
-                            }
-            
-                        ]
-                    }]}
-                )
               
-              print(response)
+              # work check condition - this could be anything , polling etc.
+              resp = urllib.request.urlopen(event['job_detail']['sourceUrl'])
+              print(resp.getcode())
+
+              if resp.getcode()==200:    
+                  print ("Work condition satisfied... starting task")
+                
+                  client = boto3.client('ecs')
+                  response = client.run_task(
+                  cluster=CLUSTER_NAME, 
+                  launchType = 'FARGATE',
+                  taskDefinition='job-runner-task',
+                  count = 1,
+                  platformVersion='LATEST',
+                  networkConfiguration={
+                        'awsvpcConfiguration': {
+                            'subnets': 
+                                SUBNETS
+                            ,
+                            'assignPublicIp': 'ENABLED'
+                        }
+                    },
+                    overrides={"containerOverrides": [{
+                            "name": "job-runner",
+                            "command": ["python" , "/tmp/run-job.py" , jobId],
+                            "environment": [
+                                {
+                                        'name': 'JOB_DETAIL',
+                                        'value': json.dumps(event)
+                                }
+                
+                            ]
+                        }]}
+                    )
+                  
+                  print(response)
+                  
+              else:
+                print("No work to do - resetting job status.")
+                
+                # update the job status in dynamodb so it can run again
+                table = dynamodb.Table(JOB_CONFIGURATION_TABLE)
+                response = table.update_item(
+                  Key={
+                      'jobId': jobId
+                  },
+                  UpdateExpression="set job_status = :js,  last_run_status=:lrs",
+                  ExpressionAttributeValues={
+                      ':js': "READY",
+                      ':lrs': "OK"
+                  },
+                  ReturnValues="UPDATED_NEW"
+                )
+                print(response)
+                
               return
+
 
         Handler: index.lambda_handler
         MemorySize: 128
@@ -451,6 +482,7 @@ Resources:
           Variables:
             CLUSTER_NAME: !Ref ECSCluster
             SUBNETS: !Ref PrivateSubnetOne
+            JOB_CONFIGURATION_TABLE: !Ref JobConfigTable
 
 
 # Lambda to dispatch scheduled jobs -->Runner Lambda
@@ -479,6 +511,7 @@ Resources:
         Environment:
           Variables:
             JOB_RUNNER_LAMBDA: !Ref JobRunnerLambda
+            JOB_CONFIGURATION_TABLE: !Ref JobConfigTable
 
   # Permission to allow Events to invoke Job Monitor
   EventsLambdaMonitorPermission:
@@ -508,6 +541,7 @@ Resources:
               import datetime
 
               dynamodb = boto3.resource('dynamodb')
+              JOB_CONFIGURATION_TABLE = os.environ["JOB_CONFIGURATION_TABLE"]
 
               def lambda_handler(event, context):
                   print(event)
@@ -518,8 +552,6 @@ Resources:
                   job_detail = json.loads(containerOverrides[0]['environment'][0]['value'])
                   print("Found jobId: " + job_detail['jobId'])
                   
-                  run_time = datetime.datetime.now().replace(microsecond=0).isoformat()
-
                   # update the job status in dynamodb so it can run again
                   table = dynamodb.Table('job_configuration')
                   response = table.update_item(
@@ -544,6 +576,10 @@ Resources:
           Role: !GetAtt LambdaExecutionRole.Arn
           Runtime: python3.7
           Timeout: 60          
+          Environment:
+            Variables:
+              JOB_CONFIGURATION_TABLE: !Ref JobConfigTable
+
 
   # DynamoDB table to hold the scheduled job configuration
   JobConfigTable:
@@ -559,8 +595,7 @@ Resources:
         ReadCapacityUnits: '5'
         WriteCapacityUnits: '5'
       TableName: job_configuration
-      StreamSpecification: 
-        StreamViewType: NEW_AND_OLD_IMAGES 
+
 
   # Cloudwatch rule to notify monitor lambda that ECS tasks have stopped.
   JobMonitorRule:
