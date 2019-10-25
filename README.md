@@ -23,7 +23,7 @@ When the fargate task is completed, the Amazon ECS (Elastic Container Service) s
 Jobs configuration records are managed by adding or updating them into the DynamoDB table.
 
 ## Advantages
-* Practically infinite number of job configurations are possible. CloudWatch default event bus is limited to 300 initially.
+* Practically unlimited job configurations are possible. CloudWatch default event bus is limited to 300 initially.
 * No requirement to maintain servers for cron tasks.
 * Flexiblity to specify different task defintions or docker containers in job configurations (not demonstrated here).
 * DynamoDB can be conveniently used by an application to manage job configurations, or see what is currently running.
